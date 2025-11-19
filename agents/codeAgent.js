@@ -1,0 +1,1570 @@
+import { CODE_GENERATION_PROMPT } from '../prompts/systemPrompts.js';
+import { callGroqStream } from '../utils/groqClient.js';
+
+/**
+ * Code Agent - Generates React components with Tailwind CSS (Single Component Mode)
+ * @param {string} prompt - User's feature request
+ * @param {Object} technicalSpec - Technical specification from Planning Agent
+ * @param {Object} designSystem - Design system from Design Agent
+ * @param {Array} conversationHistory - Previous conversation messages
+ * @param {Function} onChunk - Callback function for streaming code chunks
+ * @returns {Promise<string>} Complete generated React component code
+ * @throws {Error} If code generation fails
+ */
+export async function codeAgent(prompt, technicalSpec, designSystem, conversationHistory = [], onChunk) {
+  try {
+    // Validate required parameters
+    if (!prompt || typeof prompt !== 'string') {
+      throw new Error('Prompt is required and must be a string');
+    }
+    
+    if (!technicalSpec || typeof technicalSpec !== 'object') {
+      throw new Error('Technical specification is required and must be an object');
+    }
+    
+    if (!designSystem || typeof designSystem !== 'object') {
+      throw new Error('Design system is required and must be an object');
+    }
+    
+    if (!onChunk || typeof onChunk !== 'function') {
+      throw new Error('onChunk callback is required and must be a function');
+    }
+    
+    // Build messages array with system prompt and context
+    const messages = [
+      {
+        role: 'system',
+        content: CODE_GENERATION_PROMPT
+      },
+      {
+        role: 'system',
+        content: `Technical Specification:\n${JSON.stringify(technicalSpec, null, 2)}\n\nDesign System:\n${JSON.stringify(designSystem, null, 2)}`
+      }
+    ];
+    
+    // Add conversation history if provided
+    if (conversationHistory && Array.isArray(conversationHistory) && conversationHistory.length > 0) {
+      messages.push(...conversationHistory);
+    }
+    
+    // Add user prompt
+    messages.push({
+      role: 'user',
+      content: prompt
+    });
+    
+    console.log(`[${new Date().toISOString()}] [INFO] [Code Agent] Starting code generation...`);
+    
+    // Call Groq API with streaming enabled
+    const fullCode = await callGroqStream(
+      {
+        model: 'openai/gpt-oss-120b',
+        messages,
+        temperature: 0.2,
+        max_tokens: 4096
+      },
+      onChunk
+    );
+    
+    console.log(`[${new Date().toISOString()}] [INFO] [Code Agent] Code generation complete. Length: ${fullCode.length} characters`);
+    
+    return fullCode;
+    
+  } catch (error) {
+    const errorMessage = `Code Agent failed: ${error.message}`;
+    console.error(`[${new Date().toISOString()}] [ERROR] [Code Agent]`, error);
+    throw new Error(errorMessage);
+  }
+}
+
+/**
+ * Multi-File Code Agent - Generates complete website with multiple files
+ * @param {string} prompt - User's website request
+ * @param {Object} architectureSpec - Architecture specification from Architecture Agent
+ * @param {Object} planningSpec - Planning specification from Planning Agent
+ * @param {Object} designSystem - Design system from Design Agent
+ * @param {Array} conversationHistory - Previous conversation messages
+ * @param {Function} onFileStart - Callback when starting a new file (receives file path)
+ * @param {Function} onChunk - Callback for streaming code chunks (receives chunk text)
+ * @param {Function} onFileComplete - Callback when file is complete (receives file object)
+ * @returns {Promise<Array>} Array of generated files with path and content
+ * @throws {Error} If multi-file generation fails
+ */
+export async function codeAgentMultiFile(
+  prompt,
+  architectureSpec,
+  planningSpec,
+  designSystem,
+  conversationHistory = [],
+  onFileStart,
+  onChunk,
+  onFileComplete
+) {
+  try {
+    // Validate required parameters
+    if (!prompt || typeof prompt !== 'string') {
+      throw new Error('Prompt is required and must be a string');
+    }
+    
+    if (!architectureSpec || typeof architectureSpec !== 'object') {
+      throw new Error('Architecture specification is required and must be an object');
+    }
+    
+    if (!planningSpec || typeof planningSpec !== 'object') {
+      throw new Error('Planning specification is required and must be an object');
+    }
+    
+    if (!designSystem || typeof designSystem !== 'object') {
+      throw new Error('Design system is required and must be an object');
+    }
+    
+    if (!onFileStart || typeof onFileStart !== 'function') {
+      throw new Error('onFileStart callback is required and must be a function');
+    }
+    
+    if (!onChunk || typeof onChunk !== 'function') {
+      throw new Error('onChunk callback is required and must be a function');
+    }
+    
+    if (!onFileComplete || typeof onFileComplete !== 'function') {
+      throw new Error('onFileComplete callback is required and must be a function');
+    }
+    
+    console.log(`[${new Date().toISOString()}] [INFO] [Code Agent Multi-File] Starting multi-file generation...`);
+    
+    const generatedFiles = [];
+    const fileStructure = architectureSpec.fileStructure;
+    
+    // Build file generation queue in the correct order
+    const fileQueue = buildFileQueue(fileStructure);
+    
+    console.log(`[${new Date().toISOString()}] [INFO] [Code Agent Multi-File] Total files to generate: ${fileQueue.length}`);
+    
+    // Generate each file sequentially
+    for (let i = 0; i < fileQueue.length; i++) {
+      const fileSpec = fileQueue[i];
+      
+      try {
+        // Notify that we're starting this file
+        onFileStart(fileSpec.path);
+        
+        console.log(`[${new Date().toISOString()}] [INFO] [Code Agent Multi-File] Generating file ${i + 1}/${fileQueue.length}: ${fileSpec.path}`);
+        
+        // Generate the file content
+        const content = await generateSingleFile(
+          fileSpec,
+          prompt,
+          architectureSpec,
+          planningSpec,
+          designSystem,
+          generatedFiles, // Pass already generated files for context
+          conversationHistory,
+          onChunk
+        );
+        
+        // Validate generated content
+        if (!content || typeof content !== 'string' || content.trim().length === 0) {
+          throw new Error('Generated content is empty or invalid');
+        }
+        
+        // Create file object
+        const file = {
+          path: fileSpec.path,
+          content: content
+        };
+        
+        // Add to generated files array
+        generatedFiles.push(file);
+        
+        // Notify that file is complete
+        onFileComplete(file);
+        
+        console.log(`[${new Date().toISOString()}] [INFO] [Code Agent Multi-File] Completed file ${i + 1}/${fileQueue.length}: ${fileSpec.path} (${content.length} characters)`);
+        
+      } catch (error) {
+        console.error(`[${new Date().toISOString()}] [ERROR] [Code Agent Multi-File] Failed to generate ${fileSpec.path}:`, error.message);
+        console.error(`[${new Date().toISOString()}] [ERROR] [Code Agent Multi-File] Error details:`, error.stack);
+        
+        // Continue with next file instead of failing completely
+        // Create a placeholder file with error information
+        const errorFile = {
+          path: fileSpec.path,
+          content: `// Error generating this file: ${error.message}\n// File type: ${fileSpec.type}\n// Please regenerate this file manually or check the logs for details`
+        };
+        
+        generatedFiles.push(errorFile);
+        onFileComplete(errorFile);
+        
+        console.log(`[${new Date().toISOString()}] [WARN] [Code Agent Multi-File] Continuing with remaining files after error in ${fileSpec.path}`);
+      }
+    }
+    
+    console.log(`[${new Date().toISOString()}] [INFO] [Code Agent Multi-File] Multi-file generation complete. Generated ${generatedFiles.length} files`);
+    
+    return generatedFiles;
+    
+  } catch (error) {
+    const errorMessage = `Multi-File Code Agent failed: ${error.message}`;
+    console.error(`[${new Date().toISOString()}] [ERROR] [Code Agent Multi-File]`, error);
+    throw new Error(errorMessage);
+  }
+}
+
+/**
+ * Build file generation queue in the correct order
+ * @param {Object} fileStructure - File structure from architecture spec
+ * @returns {Array} Ordered array of file specs to generate
+ */
+function buildFileQueue(fileStructure) {
+  const queue = [];
+  
+  // 1. Configuration files first
+  if (fileStructure.config && Array.isArray(fileStructure.config)) {
+    queue.push(...fileStructure.config.map(f => ({ ...f, type: 'config' })));
+  }
+  
+  // 2. Entry files (index.html, main.jsx)
+  if (fileStructure.entry && Array.isArray(fileStructure.entry)) {
+    // Sort entry files: index.html first, then main.jsx, then App.jsx last
+    const sortedEntry = [...fileStructure.entry].sort((a, b) => {
+      if (a.path.includes('index.html')) return -1;
+      if (b.path.includes('index.html')) return 1;
+      if (a.path.includes('main.')) return -1;
+      if (b.path.includes('main.')) return 1;
+      if (a.path.includes('App.')) return 1;
+      if (b.path.includes('App.')) return -1;
+      return 0;
+    });
+    queue.push(...sortedEntry.map(f => ({ ...f, type: 'entry' })));
+  }
+  
+  // 3. Routing configuration
+  if (fileStructure.routing && Array.isArray(fileStructure.routing)) {
+    queue.push(...fileStructure.routing.map(f => ({ ...f, type: 'routing' })));
+  }
+  
+  // 4. Layout components
+  if (fileStructure.layouts && Array.isArray(fileStructure.layouts)) {
+    queue.push(...fileStructure.layouts.map(f => ({ ...f, type: 'layout' })));
+  }
+  
+  // 5. Shared components
+  if (fileStructure.components && Array.isArray(fileStructure.components)) {
+    queue.push(...fileStructure.components.map(f => ({ ...f, type: 'component' })));
+  }
+  
+  // 6. Page components
+  if (fileStructure.pages && Array.isArray(fileStructure.pages)) {
+    queue.push(...fileStructure.pages.map(f => ({ ...f, type: 'page' })));
+  }
+  
+  // Remove App.jsx from earlier position and add it at the end
+  const appIndex = queue.findIndex(f => f.path.includes('App.'));
+  if (appIndex !== -1) {
+    const appFile = queue.splice(appIndex, 1)[0];
+    queue.push(appFile);
+  }
+  
+  return queue;
+}
+
+/**
+ * Generate a single file based on its type and specification
+ * @param {Object} fileSpec - File specification with path, name, type
+ * @param {string} prompt - Original user prompt
+ * @param {Object} architectureSpec - Architecture specification
+ * @param {Object} planningSpec - Planning specification
+ * @param {Object} designSystem - Design system
+ * @param {Array} generatedFiles - Already generated files for context
+ * @param {Array} conversationHistory - Conversation history
+ * @param {Function} onChunk - Streaming callback
+ * @returns {Promise<string>} Generated file content
+ */
+async function generateSingleFile(
+  fileSpec,
+  prompt,
+  architectureSpec,
+  planningSpec,
+  designSystem,
+  generatedFiles,
+  conversationHistory,
+  onChunk
+) {
+  // Route to appropriate generator based on file type
+  switch (fileSpec.type) {
+    case 'config':
+      return await generateConfigFile(fileSpec, architectureSpec, designSystem);
+    
+    case 'entry':
+      return await generateEntryFile(fileSpec, architectureSpec, planningSpec, designSystem);
+    
+    case 'routing':
+      return await generateRoutingFile(fileSpec, architectureSpec, planningSpec, designSystem);
+    
+    case 'layout':
+      return await generateLayoutFile(fileSpec, architectureSpec, planningSpec, designSystem, onChunk);
+    
+    case 'component':
+      return await generateComponentFile(fileSpec, architectureSpec, planningSpec, designSystem, onChunk);
+    
+    case 'page':
+      return await generatePageFile(fileSpec, prompt, architectureSpec, planningSpec, designSystem, conversationHistory, onChunk);
+    
+    default:
+      throw new Error(`Unknown file type: ${fileSpec.type}`);
+  }
+}
+
+// Configuration file generators
+async function generateConfigFile(fileSpec, architectureSpec, designSystem) {
+  const fileName = fileSpec.path.split('/').pop();
+  
+  switch (fileName) {
+    case 'package.json':
+      return generatePackageJson(architectureSpec);
+    
+    case 'vite.config.js':
+    case 'vite.config.ts':
+      return generateViteConfig(architectureSpec);
+    
+    case 'tailwind.config.js':
+      return generateTailwindConfig(designSystem);
+    
+    case 'postcss.config.js':
+      return generatePostcssConfig();
+    
+    case 'tsconfig.json':
+      return generateTsConfig();
+    
+    case 'tsconfig.node.json':
+      return generateTsConfigNode();
+    
+    case 'next.config.js':
+      return generateNextConfig();
+    
+    default:
+      throw new Error(`Unknown config file: ${fileName}`);
+  }
+}
+
+/**
+ * Generate package.json with all required dependencies
+ */
+function generatePackageJson(architectureSpec) {
+  const template = architectureSpec.template || 'vite-react';
+  const projectName = architectureSpec.projectName || 'my-website';
+  const dependencies = architectureSpec.dependencies || [];
+  
+  const pkg = {
+    name: projectName,
+    private: true,
+    version: '0.0.0',
+    type: 'module'
+  };
+  
+  // Template-specific configuration
+  if (template === 'nextjs') {
+    pkg.scripts = {
+      dev: 'next dev',
+      build: 'next build',
+      start: 'next start',
+      lint: 'next lint'
+    };
+    
+    pkg.dependencies = {
+      react: '^18.3.1',
+      'react-dom': '^18.3.1',
+      next: '^14.2.0',
+      'framer-motion': '^11.0.0',
+      'lucide-react': '^0.344.0',
+      'react-hook-form': '^7.50.0',
+      'zod': '^3.22.4',
+      '@hookform/resolvers': '^3.3.4'
+    };
+    
+    pkg.devDependencies = {
+      '@types/node': '^20',
+      '@types/react': '^18',
+      '@types/react-dom': '^18',
+      typescript: '^5',
+      tailwindcss: '^3.4.1',
+      postcss: '^8.4.35',
+      autoprefixer: '^10.4.17',
+      eslint: '^8',
+      'eslint-config-next': '^14.2.0'
+    };
+  } else if (template === 'vite-react-ts') {
+    pkg.scripts = {
+      dev: 'vite',
+      build: 'tsc && vite build',
+      lint: 'eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0',
+      preview: 'vite preview'
+    };
+    
+    pkg.dependencies = {
+      react: '^18.3.1',
+      'react-dom': '^18.3.1',
+      'react-router-dom': '^6.22.0',
+      'framer-motion': '^11.0.0',
+      'lucide-react': '^0.344.0',
+      'react-hook-form': '^7.50.0',
+      'zod': '^3.22.4',
+      '@hookform/resolvers': '^3.3.4'
+    };
+    
+    pkg.devDependencies = {
+      '@types/react': '^18.3.1',
+      '@types/react-dom': '^18.3.1',
+      '@typescript-eslint/eslint-plugin': '^7.0.0',
+      '@typescript-eslint/parser': '^7.0.0',
+      '@vitejs/plugin-react': '^4.2.1',
+      autoprefixer: '^10.4.17',
+      eslint: '^8.57.0',
+      'eslint-plugin-react-hooks': '^4.6.0',
+      'eslint-plugin-react-refresh': '^0.4.5',
+      postcss: '^8.4.35',
+      tailwindcss: '^3.4.1',
+      typescript: '^5.3.3',
+      vite: '^5.1.0'
+    };
+  } else {
+    // Default: vite-react
+    pkg.scripts = {
+      dev: 'vite',
+      build: 'vite build',
+      lint: 'eslint . --ext js,jsx --report-unused-disable-directives --max-warnings 0',
+      preview: 'vite preview'
+    };
+    
+    pkg.dependencies = {
+      react: '^18.3.1',
+      'react-dom': '^18.3.1',
+      'react-router-dom': '^6.22.0',
+      'framer-motion': '^11.0.0',
+      'lucide-react': '^0.344.0',
+      'react-hook-form': '^7.50.0',
+      'zod': '^3.22.4',
+      '@hookform/resolvers': '^3.3.4'
+    };
+    
+    pkg.devDependencies = {
+      '@types/react': '^18.3.1',
+      '@types/react-dom': '^18.3.1',
+      '@vitejs/plugin-react': '^4.2.1',
+      eslint: '^8.57.0',
+      'eslint-plugin-react': '^7.33.2',
+      'eslint-plugin-react-hooks': '^4.6.0',
+      'eslint-plugin-react-refresh': '^0.4.5',
+      vite: '^5.1.0',
+      tailwindcss: '^3.4.1',
+      postcss: '^8.4.35',
+      autoprefixer: '^10.4.17'
+    };
+  }
+  
+  // Add any additional dependencies from architecture spec
+  if (dependencies.length > 0) {
+    dependencies.forEach(dep => {
+      if (!pkg.dependencies[dep] && !pkg.devDependencies[dep]) {
+        // Add to dependencies with latest version
+        pkg.dependencies[dep] = 'latest';
+      }
+    });
+  }
+  
+  return JSON.stringify(pkg, null, 2);
+}
+
+/**
+ * Generate vite.config.js or vite.config.ts
+ */
+function generateViteConfig(architectureSpec) {
+  const template = architectureSpec.template || 'vite-react';
+  const isTypeScript = template === 'vite-react-ts';
+  
+  return `import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+// https://vitejs.dev/config/
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 3000,
+    open: true
+  },
+  build: {
+    outDir: 'dist',
+    sourcemap: true
+  }
+})
+`;
+}
+
+/**
+ * Generate tailwind.config.js with design system colors and animations
+ */
+function generateTailwindConfig(designSystem) {
+  const colors = designSystem.colors || {};
+  
+  // Build custom colors object with all color variations
+  const customColors = {};
+  if (colors.primary) customColors.primary = colors.primary;
+  if (colors.primaryLight) customColors.primaryLight = colors.primaryLight;
+  if (colors.primaryDark) customColors.primaryDark = colors.primaryDark;
+  if (colors.secondary) customColors.secondary = colors.secondary;
+  if (colors.secondaryLight) customColors.secondaryLight = colors.secondaryLight;
+  if (colors.accent) customColors.accent = colors.accent;
+  if (colors.accentLight) customColors.accentLight = colors.accentLight;
+  
+  const colorsString = Object.keys(customColors).length > 0
+    ? JSON.stringify(customColors, null, 8).replace(/"/g, "'")
+    : '{}';
+  
+  return `/** @type {import('tailwindcss').Config} */
+export default {
+  content: [
+    "./index.html",
+    "./src/**/*.{js,ts,jsx,tsx}",
+  ],
+  theme: {
+    extend: {
+      colors: ${colorsString},
+      fontFamily: {
+        heading: ['${designSystem.fonts?.heading || 'Inter'}', 'sans-serif'],
+        body: ['${designSystem.fonts?.body || 'Inter'}', 'sans-serif'],
+      },
+      animation: {
+        'fadeIn': 'fadeIn 1s ease-in-out',
+        'slideUp': 'slideUp 0.6s ease-out',
+        'slideDown': 'slideDown 0.6s ease-out',
+        'slideLeft': 'slideLeft 0.6s ease-out',
+        'slideRight': 'slideRight 0.6s ease-out',
+        'scale': 'scale 0.5s ease-out',
+        'float': 'float 3s ease-in-out infinite',
+      },
+      keyframes: {
+        fadeIn: {
+          '0%': { opacity: '0' },
+          '100%': { opacity: '1' },
+        },
+        slideUp: {
+          '0%': { opacity: '0', transform: 'translateY(20px)' },
+          '100%': { opacity: '1', transform: 'translateY(0)' },
+        },
+        slideDown: {
+          '0%': { opacity: '0', transform: 'translateY(-20px)' },
+          '100%': { opacity: '1', transform: 'translateY(0)' },
+        },
+        slideLeft: {
+          '0%': { opacity: '0', transform: 'translateX(20px)' },
+          '100%': { opacity: '1', transform: 'translateX(0)' },
+        },
+        slideRight: {
+          '0%': { opacity: '0', transform: 'translateX(-20px)' },
+          '100%': { opacity: '1', transform: 'translateX(0)' },
+        },
+        scale: {
+          '0%': { opacity: '0', transform: 'scale(0.9)' },
+          '100%': { opacity: '1', transform: 'scale(1)' },
+        },
+        float: {
+          '0%, 100%': { transform: 'translateY(0)' },
+          '50%': { transform: 'translateY(-10px)' },
+        },
+      },
+    },
+  },
+  plugins: [],
+}
+`;
+}
+
+/**
+ * Generate postcss.config.js
+ */
+function generatePostcssConfig() {
+  return `export default {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+}
+`;
+}
+
+/**
+ * Generate tsconfig.json for TypeScript projects
+ */
+function generateTsConfig() {
+  return `{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Linting */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}
+`;
+}
+
+/**
+ * Generate tsconfig.node.json for TypeScript projects
+ */
+function generateTsConfigNode() {
+  return `{
+  "compilerOptions": {
+    "composite": true,
+    "skipLibCheck": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowSyntheticDefaultImports": true
+  },
+  "include": ["vite.config.ts"]
+}
+`;
+}
+
+/**
+ * Generate next.config.js for Next.js projects
+ */
+function generateNextConfig() {
+  return `/** @type {import('next').NextConfig} */
+const nextConfig = {
+  reactStrictMode: true,
+}
+
+module.exports = nextConfig
+`;
+}
+
+async function generateEntryFile(fileSpec, architectureSpec, planningSpec, designSystem) {
+  const fileName = fileSpec.path.split('/').pop();
+  const template = architectureSpec.template || 'vite-react';
+  
+  switch (fileName) {
+    case 'index.html':
+      return generateIndexHtml(architectureSpec, designSystem);
+    
+    case 'main.jsx':
+    case 'main.tsx':
+      return generateMainFile(architectureSpec, template);
+    
+    case 'App.jsx':
+    case 'App.tsx':
+      return generateAppFile(architectureSpec, template);
+    
+    case 'index.css':
+      return generateIndexCss();
+    
+    case 'globals.css':
+      return generateGlobalsCss(designSystem);
+    
+    default:
+      throw new Error(`Unknown entry file: ${fileName}`);
+  }
+}
+
+/**
+ * Generate index.html with proper meta tags and root div
+ */
+function generateIndexHtml(architectureSpec, designSystem) {
+  const projectName = architectureSpec.projectName || 'My Website';
+  const titleCase = projectName
+    .split('-')
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+  
+  const primaryColor = designSystem.colors?.primary || '#3B82F6';
+  const template = architectureSpec.template || 'vite-react';
+  const isTypeScript = template === 'vite-react-ts';
+  const mainExt = isTypeScript ? 'tsx' : 'jsx';
+  
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="${titleCase} - Built with React and Tailwind CSS" />
+    <meta name="theme-color" content="${primaryColor}" />
+    <title>${titleCase}</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.${mainExt}"></script>
+  </body>
+</html>
+`;
+}
+
+/**
+ * Generate main.jsx/tsx with React and router setup
+ */
+function generateMainFile(architectureSpec, template) {
+  const isTypeScript = template === 'vite-react-ts';
+  const ext = isTypeScript ? 'tsx' : 'jsx';
+  
+  return `import React from 'react'
+import ReactDOM from 'react-dom/client'
+import App from './App.${ext}'
+import './index.css'
+
+ReactDOM.createRoot(document.getElementById('root')${isTypeScript ? '!' : ''}).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+)
+`;
+}
+
+/**
+ * Generate App.jsx/tsx with router provider
+ */
+function generateAppFile(architectureSpec, template) {
+  const isTypeScript = template === 'vite-react-ts';
+  const ext = isTypeScript ? 'tsx' : 'jsx';
+  
+  return `import { RouterProvider } from 'react-router-dom'
+import router from './router.${ext}'
+
+function App() {
+  return <RouterProvider router={router} />
+}
+
+export default App
+`;
+}
+
+/**
+ * Generate index.css with Tailwind directives
+ */
+function generateIndexCss() {
+  return `@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+`;
+}
+
+/**
+ * Generate globals.css for Next.js with Tailwind directives
+ */
+function generateGlobalsCss(designSystem) {
+  const primaryColor = designSystem.colors?.primary || '#3B82F6';
+  const textColor = designSystem.colors?.text || '#1F2937';
+  const bgColor = designSystem.colors?.bg || '#FFFFFF';
+  
+  return `@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --primary-color: ${primaryColor};
+  --text-color: ${textColor};
+  --bg-color: ${bgColor};
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
+body {
+  color: var(--text-color);
+  background: var(--bg-color);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+`;
+}
+
+async function generateRoutingFile(fileSpec, architectureSpec, planningSpec, designSystem) {
+  const template = architectureSpec.template || 'vite-react';
+  const isTypeScript = template === 'vite-react-ts';
+  const ext = isTypeScript ? 'tsx' : 'jsx';
+  
+  // Get pages from architecture spec
+  const pages = architectureSpec.fileStructure?.pages || [];
+  const layouts = architectureSpec.fileStructure?.layouts || [];
+  
+  // Build imports for all pages
+  const pageImports = pages.map(page => {
+    const componentName = page.name;
+    const importPath = `./${page.path.replace('src/', '').replace(`.${ext}`, '')}`;
+    return `import ${componentName} from '${importPath}'`;
+  }).join('\n');
+  
+  // Build imports for layouts
+  const layoutImports = layouts.map(layout => {
+    const componentName = layout.name;
+    const importPath = `./${layout.path.replace('src/', '').replace(`.${ext}`, '')}`;
+    return `import ${componentName} from '${importPath}'`;
+  }).join('\n');
+  
+  // Build routes array
+  const hasLayout = layouts.length > 0;
+  const layoutName = hasLayout ? layouts[0].name : null;
+  
+  let routesArray = '';
+  
+  if (hasLayout) {
+    // Use nested routes with layout
+    const pageRoutes = pages.map(page => {
+      return `      {
+        path: '${page.route}',
+        element: <${page.name} />
+      }`;
+    }).join(',\n');
+    
+    routesArray = `  {
+    path: '/',
+    element: <${layoutName} />,
+    children: [
+${pageRoutes},
+      {
+        path: '*',
+        element: <NotFound />
+      }
+    ]
+  }`;
+  } else {
+    // Flat routes without layout
+    const pageRoutes = pages.map(page => {
+      return `  {
+    path: '${page.route}',
+    element: <${page.name} />
+  }`;
+    }).join(',\n');
+    
+    routesArray = `${pageRoutes},
+  {
+    path: '*',
+    element: <NotFound />
+  }`;
+  }
+  
+  return `import { createBrowserRouter } from 'react-router-dom'
+${layoutImports}
+${pageImports}
+
+// 404 Not Found page
+function NotFound() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <div className="text-center">
+        <h1 className="text-6xl font-bold text-gray-900 mb-4">404</h1>
+        <p className="text-xl text-gray-600 mb-8">Page not found</p>
+        <a
+          href="/"
+          className="inline-block px-6 py-3 bg-primary text-white rounded-lg hover:bg-blue-600 transition-colors"
+        >
+          Go back home
+        </a>
+      </div>
+    </div>
+  )
+}
+
+const router = createBrowserRouter([
+${routesArray}
+])
+
+export default router
+`;
+}
+
+async function generateLayoutFile(fileSpec, architectureSpec, planningSpec, designSystem, onChunk) {
+  const template = architectureSpec.template || 'vite-react';
+  const isNextJs = template === 'nextjs';
+  
+  if (isNextJs) {
+    return generateNextJsLayout(fileSpec, architectureSpec, planningSpec, designSystem);
+  }
+  
+  const isTypeScript = template === 'vite-react-ts';
+  const ext = isTypeScript ? 'tsx' : 'jsx';
+  
+  // Get shared components to determine imports
+  const components = architectureSpec.fileStructure?.components || [];
+  const hasNavbar = components.some(c => c.name === 'Navbar');
+  const hasFooter = components.some(c => c.name === 'Footer');
+  
+  // Build imports
+  let imports = `import { Outlet } from 'react-router-dom'\n`;
+  
+  if (hasNavbar) {
+    const navbarComponent = components.find(c => c.name === 'Navbar');
+    const navbarPath = navbarComponent.path.replace('src/', '').replace(`.${ext}`, '');
+    imports += `import Navbar from '../${navbarPath.split('/').pop()}'\n`;
+  }
+  
+  if (hasFooter) {
+    const footerComponent = components.find(c => c.name === 'Footer');
+    const footerPath = footerComponent.path.replace('src/', '').replace(`.${ext}`, '');
+    imports += `import Footer from '../${footerPath.split('/').pop()}'\n`;
+  }
+  
+  // Build layout structure
+  const layoutName = fileSpec.name || 'MainLayout';
+  
+  return `${imports}
+function ${layoutName}() {
+  return (
+    <div className="min-h-screen flex flex-col">
+      ${hasNavbar ? '<Navbar />' : ''}
+      <main className="flex-grow">
+        <Outlet />
+      </main>
+      ${hasFooter ? '<Footer />' : ''}
+    </div>
+  )
+}
+
+export default ${layoutName}
+`;
+}
+
+/**
+ * Generate Next.js root layout (app/layout.tsx)
+ */
+function generateNextJsLayout(fileSpec, architectureSpec, planningSpec, designSystem) {
+  const projectName = architectureSpec.projectName || 'My Website';
+  const titleCase = projectName
+    .split('-')
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+  
+  const components = architectureSpec.fileStructure?.components || [];
+  const hasNavbar = components.some(c => c.name === 'Navbar');
+  const hasFooter = components.some(c => c.name === 'Footer');
+  
+  // Build imports for components
+  let componentImports = '';
+  if (hasNavbar) {
+    componentImports += `import Navbar from '@/components/Navbar'\n`;
+  }
+  if (hasFooter) {
+    componentImports += `import Footer from '@/components/Footer'\n`;
+  }
+  
+  const fonts = designSystem.fonts || {};
+  const headingFont = fonts.heading || 'Inter';
+  const bodyFont = fonts.body || 'Inter';
+  
+  return `import type { Metadata } from 'next'
+import './globals.css'
+${componentImports}
+export const metadata: Metadata = {
+  title: '${titleCase}',
+  description: '${titleCase} - Built with Next.js and Tailwind CSS',
+}
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode
+}) {
+  return (
+    <html lang="en">
+      <body className="min-h-screen flex flex-col">
+        ${hasNavbar ? '<Navbar />' : ''}
+        <main className="flex-grow">
+          {children}
+        </main>
+        ${hasFooter ? '<Footer />' : ''}
+      </body>
+    </html>
+  )
+}
+`;
+}
+
+async function generateComponentFile(fileSpec, architectureSpec, planningSpec, designSystem, onChunk) {
+  const componentName = fileSpec.name;
+  
+  // Import beautiful templates
+  const { generateBeautifulNavbar, generateBeautifulFooter } = await import('./componentTemplates.js');
+  
+  // Check if this is a known shared component (Navbar, Footer, etc.)
+  if (componentName === 'Navbar') {
+    return generateBeautifulNavbar(architectureSpec, planningSpec, designSystem);
+  } else if (componentName === 'Footer') {
+    return generateBeautifulFooter(architectureSpec, planningSpec, designSystem);
+  } else {
+    // For other components, use AI generation
+    return await generateCustomComponent(fileSpec, architectureSpec, planningSpec, designSystem, onChunk);
+  }
+}
+
+/**
+ * Generate Navbar component with responsive menu
+ */
+function generateNavbarComponent(architectureSpec, planningSpec, designSystem) {
+  const template = architectureSpec.template || 'vite-react';
+  const isNextJs = template === 'nextjs';
+  const pages = architectureSpec.fileStructure?.pages || [];
+  const projectName = architectureSpec.projectName || 'My Website';
+  const titleCase = projectName
+    .split('-')
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+  
+  // Get navbar styles from design system
+  const navbarStyles = designSystem.components?.navbar || {};
+  const bgClass = navbarStyles.background || 'bg-white';
+  const shadowClass = navbarStyles.shadow || 'shadow-md';
+  const paddingClass = navbarStyles.padding || 'px-6';
+  const textColor = navbarStyles.textColor || 'text-gray-900';
+  const hoverColor = navbarStyles.hoverColor || 'text-primary';
+  
+  if (isNextJs) {
+    // Next.js version with Link from next/link and usePathname
+    return `'use client'
+
+import { useState } from 'react'
+import Link from 'next/link'
+import { usePathname } from 'next/navigation'
+
+export default function Navbar() {
+  const [isMenuOpen, setIsMenuOpen] = useState(false)
+  const pathname = usePathname()
+
+  const navLinks = [
+${pages.map(page => `    { name: '${page.name}', path: '${page.route}' }`).join(',\n')}
+  ]
+
+  return (
+    <nav className="${bgClass} ${shadowClass} ${paddingClass} py-4 sticky top-0 z-50">
+      <div className="max-w-7xl mx-auto flex items-center justify-between">
+        {/* Logo */}
+        <Link href="/" className="text-2xl font-bold ${textColor}">
+          ${titleCase}
+        </Link>
+
+        {/* Desktop Navigation */}
+        <div className="hidden md:flex items-center space-x-8">
+          {navLinks.map((link) => (
+            <Link
+              key={link.path}
+              href={link.path}
+              className={\`${textColor} hover:${hoverColor} transition-colors \${
+                pathname === link.path ? 'font-semibold ${hoverColor}' : ''
+              }\`}
+            >
+              {link.name}
+            </Link>
+          ))}
+        </div>
+
+        {/* Mobile Menu Button */}
+        <button
+          onClick={() => setIsMenuOpen(!isMenuOpen)}
+          className="md:hidden ${textColor} focus:outline-none"
+          aria-label="Toggle menu"
+        >
+          <svg
+            className="w-6 h-6"
+            fill="none"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth="2"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+          >
+            {isMenuOpen ? (
+              <path d="M6 18L18 6M6 6l12 12" />
+            ) : (
+              <path d="M4 6h16M4 12h16M4 18h16" />
+            )}
+          </svg>
+        </button>
+      </div>
+
+      {/* Mobile Menu */}
+      {isMenuOpen && (
+        <div className="md:hidden mt-4 pb-4">
+          <div className="flex flex-col space-y-4">
+            {navLinks.map((link) => (
+              <Link
+                key={link.path}
+                href={link.path}
+                onClick={() => setIsMenuOpen(false)}
+                className={\`${textColor} hover:${hoverColor} transition-colors \${
+                  pathname === link.path ? 'font-semibold ${hoverColor}' : ''
+                }\`}
+              >
+                {link.name}
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
+    </nav>
+  )
+}
+`;
+  }
+  
+  // Vite React version with react-router-dom
+  return `import { useState } from 'react'
+import { Link, useLocation } from 'react-router-dom'
+
+function Navbar() {
+  const [isMenuOpen, setIsMenuOpen] = useState(false)
+  const location = useLocation()
+
+  const navLinks = [
+${pages.map(page => `    { name: '${page.name}', path: '${page.route}' }`).join(',\n')}
+  ]
+
+  return (
+    <nav className="${bgClass} ${shadowClass} ${paddingClass} py-4 sticky top-0 z-50">
+      <div className="max-w-7xl mx-auto flex items-center justify-between">
+        {/* Logo */}
+        <Link to="/" className="text-2xl font-bold ${textColor}">
+          ${titleCase}
+        </Link>
+
+        {/* Desktop Navigation */}
+        <div className="hidden md:flex items-center space-x-8">
+          {navLinks.map((link) => (
+            <Link
+              key={link.path}
+              to={link.path}
+              className={\`${textColor} hover:${hoverColor} transition-colors \${
+                location.pathname === link.path ? 'font-semibold ${hoverColor}' : ''
+              }\`}
+            >
+              {link.name}
+            </Link>
+          ))}
+        </div>
+
+        {/* Mobile Menu Button */}
+        <button
+          onClick={() => setIsMenuOpen(!isMenuOpen)}
+          className="md:hidden ${textColor} focus:outline-none"
+          aria-label="Toggle menu"
+        >
+          <svg
+            className="w-6 h-6"
+            fill="none"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth="2"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+          >
+            {isMenuOpen ? (
+              <path d="M6 18L18 6M6 6l12 12" />
+            ) : (
+              <path d="M4 6h16M4 12h16M4 18h16" />
+            )}
+          </svg>
+        </button>
+      </div>
+
+      {/* Mobile Menu */}
+      {isMenuOpen && (
+        <div className="md:hidden mt-4 pb-4">
+          <div className="flex flex-col space-y-4">
+            {navLinks.map((link) => (
+              <Link
+                key={link.path}
+                to={link.path}
+                onClick={() => setIsMenuOpen(false)}
+                className={\`${textColor} hover:${hoverColor} transition-colors \${
+                  location.pathname === link.path ? 'font-semibold ${hoverColor}' : ''
+                }\`}
+              >
+                {link.name}
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
+    </nav>
+  )
+}
+
+export default Navbar
+`;
+}
+
+/**
+ * Generate Footer component with links
+ */
+function generateFooterComponent(architectureSpec, planningSpec, designSystem) {
+  const template = architectureSpec.template || 'vite-react';
+  const isNextJs = template === 'nextjs';
+  const pages = architectureSpec.fileStructure?.pages || [];
+  const projectName = architectureSpec.projectName || 'My Website';
+  const titleCase = projectName
+    .split('-')
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+  
+  // Get footer styles from design system
+  const footerStyles = designSystem.components?.footer || {};
+  const bgClass = footerStyles.background || 'bg-gray-900';
+  const textColor = footerStyles.textColor || 'text-white';
+  const paddingClass = footerStyles.padding || 'py-12 px-6';
+  const linkColor = footerStyles.linkColor || 'text-gray-300';
+  const linkHoverColor = footerStyles.linkHoverColor || 'text-white';
+  
+  const currentYear = new Date().getFullYear();
+  
+  if (isNextJs) {
+    // Next.js version with Link from next/link
+    return `import Link from 'next/link'
+
+export default function Footer() {
+  const navLinks = [
+${pages.map(page => `    { name: '${page.name}', path: '${page.route}' }`).join(',\n')}
+  ]
+
+  return (
+    <footer className="${bgClass} ${textColor} ${paddingClass}">
+      <div className="max-w-7xl mx-auto">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-8">
+          {/* Brand */}
+          <div>
+            <h3 className="text-xl font-bold mb-4">${titleCase}</h3>
+            <p className="${linkColor}">
+              Built with Next.js and Tailwind CSS
+            </p>
+          </div>
+
+          {/* Navigation Links */}
+          <div>
+            <h4 className="text-lg font-semibold mb-4">Navigation</h4>
+            <ul className="space-y-2">
+              {navLinks.map((link) => (
+                <li key={link.path}>
+                  <Link
+                    href={link.path}
+                    className="${linkColor} hover:${linkHoverColor} transition-colors"
+                  >
+                    {link.name}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          {/* Social Links */}
+          <div>
+            <h4 className="text-lg font-semibold mb-4">Connect</h4>
+            <div className="flex space-x-4">
+              <a
+                href="#"
+                className="${linkColor} hover:${linkHoverColor} transition-colors"
+                aria-label="Twitter"
+              >
+                <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M8.29 20.251c7.547 0 11.675-6.253 11.675-11.675 0-.178 0-.355-.012-.53A8.348 8.348 0 0022 5.92a8.19 8.19 0 01-2.357.646 4.118 4.118 0 001.804-2.27 8.224 8.224 0 01-2.605.996 4.107 4.107 0 00-6.993 3.743 11.65 11.65 0 01-8.457-4.287 4.106 4.106 0 001.27 5.477A4.072 4.072 0 012.8 9.713v.052a4.105 4.105 0 003.292 4.022 4.095 4.095 0 01-1.853.07 4.108 4.108 0 003.834 2.85A8.233 8.233 0 012 18.407a11.616 11.616 0 006.29 1.84" />
+                </svg>
+              </a>
+              <a
+                href="#"
+                className="${linkColor} hover:${linkHoverColor} transition-colors"
+                aria-label="GitHub"
+              >
+                <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                  <path fillRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" clipRule="evenodd" />
+                </svg>
+              </a>
+              <a
+                href="#"
+                className="${linkColor} hover:${linkHoverColor} transition-colors"
+                aria-label="LinkedIn"
+              >
+                <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z" />
+                </svg>
+              </a>
+            </div>
+          </div>
+        </div>
+
+        {/* Copyright */}
+        <div className="border-t border-gray-800 pt-8 text-center ${linkColor}">
+          <p>&copy; ${currentYear} ${titleCase}. All rights reserved.</p>
+        </div>
+      </div>
+    </footer>
+  )
+}
+`;
+  }
+  
+  // Vite React version with react-router-dom
+  return `import { Link } from 'react-router-dom'
+
+function Footer() {
+  const navLinks = [
+${pages.map(page => `    { name: '${page.name}', path: '${page.route}' }`).join(',\n')}
+  ]
+
+  return (
+    <footer className="${bgClass} ${textColor} ${paddingClass}">
+      <div className="max-w-7xl mx-auto">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-8">
+          {/* Brand */}
+          <div>
+            <h3 className="text-xl font-bold mb-4">${titleCase}</h3>
+            <p className="${linkColor}">
+              Built with React and Tailwind CSS
+            </p>
+          </div>
+
+          {/* Navigation Links */}
+          <div>
+            <h4 className="text-lg font-semibold mb-4">Navigation</h4>
+            <ul className="space-y-2">
+              {navLinks.map((link) => (
+                <li key={link.path}>
+                  <Link
+                    to={link.path}
+                    className="${linkColor} hover:${linkHoverColor} transition-colors"
+                  >
+                    {link.name}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          {/* Social Links */}
+          <div>
+            <h4 className="text-lg font-semibold mb-4">Connect</h4>
+            <div className="flex space-x-4">
+              <a
+                href="#"
+                className="${linkColor} hover:${linkHoverColor} transition-colors"
+                aria-label="Twitter"
+              >
+                <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M8.29 20.251c7.547 0 11.675-6.253 11.675-11.675 0-.178 0-.355-.012-.53A8.348 8.348 0 0022 5.92a8.19 8.19 0 01-2.357.646 4.118 4.118 0 001.804-2.27 8.224 8.224 0 01-2.605.996 4.107 4.107 0 00-6.993 3.743 11.65 11.65 0 01-8.457-4.287 4.106 4.106 0 001.27 5.477A4.072 4.072 0 012.8 9.713v.052a4.105 4.105 0 003.292 4.022 4.095 4.095 0 01-1.853.07 4.108 4.108 0 003.834 2.85A8.233 8.233 0 012 18.407a11.616 11.616 0 006.29 1.84" />
+                </svg>
+              </a>
+              <a
+                href="#"
+                className="${linkColor} hover:${linkHoverColor} transition-colors"
+                aria-label="GitHub"
+              >
+                <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                  <path fillRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" clipRule="evenodd" />
+                </svg>
+              </a>
+              <a
+                href="#"
+                className="${linkColor} hover:${linkHoverColor} transition-colors"
+                aria-label="LinkedIn"
+              >
+                <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z" />
+                </svg>
+              </a>
+            </div>
+          </div>
+        </div>
+
+        {/* Copyright */}
+        <div className="border-t border-gray-800 pt-8 text-center ${linkColor}">
+          <p>&copy; ${currentYear} ${titleCase}. All rights reserved.</p>
+        </div>
+      </div>
+    </footer>
+  )
+}
+
+export default Footer
+`;
+}
+
+/**
+ * Generate custom component using AI
+ */
+async function generateCustomComponent(fileSpec, architectureSpec, planningSpec, designSystem, onChunk) {
+  try {
+    const componentName = fileSpec.name;
+    
+    // Find component spec in planning spec
+    const componentSpec = planningSpec.sharedComponents?.find(c => c.name === componentName) || {
+      name: componentName,
+      purpose: `${componentName} component`,
+      features: [],
+      complexity: 'simple'
+    };
+    
+    // Build prompt for component generation
+    const prompt = `Generate a React component named ${componentName}.
+
+Purpose: ${componentSpec.purpose}
+Features: ${componentSpec.features.join(', ')}
+
+The component should be production-ready, accessible, and use Tailwind CSS for styling.`;
+    
+    // Build messages for AI generation
+    const messages = [
+      {
+        role: 'system',
+        content: CODE_GENERATION_PROMPT
+      },
+      {
+        role: 'system',
+        content: `Design System:\n${JSON.stringify(designSystem, null, 2)}\n\nComponent Specification:\n${JSON.stringify(componentSpec, null, 2)}`
+      },
+      {
+        role: 'user',
+        content: prompt
+      }
+    ];
+    
+    // Generate component using AI
+    const code = await callGroqStream(
+      {
+        model: 'llama-3.3-70b-versatile',
+        messages,
+        temperature: 0.2,
+        max_tokens: 4096
+      },
+      onChunk
+    );
+    
+    if (!code || code.trim().length === 0) {
+      throw new Error(`AI generated empty code for component ${componentName}`);
+    }
+    
+    return code;
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] [ERROR] [Code Agent] Failed to generate custom component ${fileSpec.name}:`, error);
+    throw new Error(`Custom component generation failed: ${error.message}`);
+  }
+}
+
+async function generatePageFile(fileSpec, prompt, architectureSpec, planningSpec, designSystem, conversationHistory, onChunk) {
+  try {
+    const pageName = fileSpec.name;
+    
+    // Find page spec in planning spec
+    const pageSpec = planningSpec.pages?.find(p => p.name === pageName) || {
+      name: pageName,
+      purpose: `${pageName} page`,
+      components: [],
+      features: [],
+      complexity: 'medium'
+    };
+    
+    // Build detailed prompt for page generation
+    const pagePrompt = `Generate a complete React page component for the ${pageName} page.
+
+Original Request: ${prompt}
+
+Page Purpose: ${pageSpec.purpose}
+Page Components: ${pageSpec.components.join(', ')}
+Page Features: ${pageSpec.features.join(', ')}
+Complexity: ${pageSpec.complexity}
+
+Requirements:
+- Create a fully functional, production-ready page component
+- Use Tailwind CSS for all styling following the design system
+- Make the page responsive (mobile-first approach)
+- Include proper accessibility attributes (ARIA labels, semantic HTML)
+- Implement all features mentioned in the page specification
+- Use modern React patterns (hooks, functional components)
+- Add helpful comments for complex sections
+- Ensure the page integrates well with the overall website structure
+
+The page should be self-contained and ready to be used in the React Router setup.`;
+    
+    // Build messages for AI generation
+    const messages = [
+      {
+        role: 'system',
+        content: CODE_GENERATION_PROMPT
+      },
+      {
+        role: 'system',
+        content: `Architecture Specification:\n${JSON.stringify(architectureSpec, null, 2)}\n\nPlanning Specification:\n${JSON.stringify(planningSpec, null, 2)}\n\nDesign System:\n${JSON.stringify(designSystem, null, 2)}\n\nPage Specification:\n${JSON.stringify(pageSpec, null, 2)}`
+      }
+    ];
+    
+    // Add conversation history if provided
+    if (conversationHistory && Array.isArray(conversationHistory) && conversationHistory.length > 0) {
+      messages.push(...conversationHistory);
+    }
+    
+    // Add page prompt
+    messages.push({
+      role: 'user',
+      content: pagePrompt
+    });
+    
+    // Generate page using AI
+    const code = await callGroqStream(
+      {
+        model: 'llama-3.3-70b-versatile',
+        messages,
+        temperature: 0.2,
+        max_tokens: 8192
+      },
+      onChunk
+    );
+    
+    if (!code || code.trim().length === 0) {
+      throw new Error(`AI generated empty code for ${pageName} page`);
+    }
+    
+    return code;
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] [ERROR] [Code Agent] Failed to generate page ${fileSpec.name}:`, error);
+    throw new Error(`Page generation failed: ${error.message}`);
+  }
+}    

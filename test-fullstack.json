@@ -1,0 +1,6 @@
+{
+  "prompt": "Create a simple task management application with user authentication. Users should be able to create, view, update, and delete tasks. Include a dashboard showing all tasks.",
+  "template": "vite-react",
+  "includeBackend": true,
+  "enableQA": false
+}
