@@ -1224,9 +1224,3 @@ const isMainModule = process.argv[1] && import.meta.url === `file:///${process.a
 if (isMainModule) {
   startServer();
 }
-
-const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, () => {
-  console.log(`[${new Date().toISOString()}] Server running on port ${PORT}`);
-});
