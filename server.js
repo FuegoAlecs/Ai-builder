@@ -1220,7 +1220,8 @@ export { createApp, validateEnvironment, setupSSEHeaders, sendSSE, setupGraceful
 
 // Call startServer() at module execution if running directly (not imported as module)
 // Check if this module is the main entry point
-const isMainModule = process.argv[1] && import.meta.url === `file:///${process.argv[1].replace(/\\/g, '/')}`;
-if (isMainModule) {
-  startServer();
-}
+// Start server immediately
+startServer().catch(error => {
+  console.error(`[${new Date().toISOString()}] [FATAL] [Server] Startup failed:`, error);
+  process.exit(1);
+});
