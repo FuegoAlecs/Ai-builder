@@ -80,13 +80,20 @@ function validateEnvironment() {
 function createApp() {
   const app = express();
   
-  // Configure CORS
+  // Configure CORS with preflight support
   const corsOptions = {
     origin: process.env.FRONTEND_URL || (process.env.NODE_ENV === 'production' ? false : '*'),
-    credentials: true
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    optionsSuccessStatus: 200
   };
   
   app.use(cors(corsOptions));
+  
+  // Handle preflight requests for all routes
+  app.options('*', cors(corsOptions));
+  
   console.log(`[${new Date().toISOString()}] [INFO] [Middleware] CORS configured with origin: ${corsOptions.origin}`);
   
   // Configure JSON parsing
